@@ -57,6 +57,10 @@ def interleaved_content_as_str(
         return _process(content)
 
 
+async def _validate_request_url_not_private(request: httpx2.Request) -> None:
+    validate_url_not_private(str(request.url))
+
+
 async def localize_image_content(uri: str) -> tuple[bytes, str] | None:
     """Download or decode image content from a URI.
 
@@ -65,11 +69,22 @@ async def localize_image_content(uri: str) -> tuple[bytes, str] | None:
 
     Returns:
         Tuple of (raw_bytes, format_string) or None if URI scheme is unsupported
+
+    Raises:
+        ValueError: If the URL, or any redirect target, resolves to a private address,
+            or the download does not end in a 2xx response.
     """
     if uri.startswith("http"):
-        validate_url_not_private(uri)
-        async with httpx2.AsyncClient(timeout=httpx2.Timeout(30.0, connect=10.0)) as client:
+        # The request hook runs before the first request and before every redirect hop,
+        # so a public URL cannot redirect the download to a private address.
+        async with httpx2.AsyncClient(
+            timeout=httpx2.Timeout(30.0, connect=10.0),
+            follow_redirects=True,
+            event_hooks={"request": [_validate_request_url_not_private]},
+        ) as client:
             r = await client.get(uri)
+            if not r.is_success:
+                raise ValueError(f"Failed to download image from {uri}: HTTP {r.status_code}")
             content = r.content
             content_type = r.headers.get("content-type")
             if content_type:
